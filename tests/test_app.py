@@ -11,7 +11,7 @@ except ImportError:  # нет tkinter
 from transcheck import app, config
 from transcheck.config import TransCheckError
 
-from .helpers import FakeWin, TkCase
+from .helpers import FakeWin, TkCase, russian_speller
 
 
 class ControllerBase(TkCase):
@@ -22,11 +22,13 @@ class ControllerBase(TkCase):
         self.win = FakeWin()
         self.opened = []
 
-    def make(self, cfg=None):
+    def make(self, cfg=None, speller=None):
+        """По умолчанию словаря нет: тесты не должны зависеть от того, что установлено в Windows на сборщике."""
         if cfg is not None:
             with open(os.path.join(self.dir.name, "config.json"), "w", encoding="utf-8") as f:
                 json.dump(cfg, f)
-        self.c = app.Controller(self.root, self.dir.name, self.win, opener=self.opened.append)
+        factory = (lambda: (speller, "словарь теста")) if speller is not None else (lambda: (None, "в тесте словаря нет"))
+        self.c = app.Controller(self.root, self.dir.name, self.win, opener=self.opened.append, speller_factory=factory)
         # На экране без оконного менеджера Tk считает, что фокус всегда у него; в жизни фокус у браузера
         self.c._app_has_focus = lambda: False
         self.root.deiconify()
@@ -345,7 +347,106 @@ class SelfTestButton(ControllerBase):
         self.assertEqual(c.ui.get_text(), "")  # проверочная запись не подхватывается как «скопированный текст»
 
 
+class Spelling(ControllerBase):
+    def test_default_without_dictionary_says_so(self):
+        c = self.make()
+        self.assertIsNone(c.speller)
+        self.assertIn("не проверяет", c.ui.hint.cget("text"))
+        self.assertIn("в тесте словаря нет", c.ui.hint.cget("text"))
+
+    def test_dictionary_is_used_and_flag_file_is_removed(self):
+        c = self.make(speller=russian_speller())
+        c.ui.set_text("привет казел")
+        self.assertEqual(c.ui.summary_var.get(), "Замечаний: 1")
+        self.assertFalse(os.path.exists(os.path.join(self.dir.name, "spell_crash.flag")))
+
+    def test_config_can_turn_spelling_off(self):
+        c = self.make(cfg={"spellcheck": False}, speller=russian_speller())
+        self.assertIsNone(c.speller)
+        c.ui.set_text("привет казел")
+        self.assertEqual(c.ui.summary_var.get(), "Замечаний нет")
+        self.assertIn("spellcheck", c.ui.hint.cget("text"))
+
+    def test_crash_flag_disables_spelling(self):
+        with open(os.path.join(self.dir.name, "spell_crash.flag"), "w") as f:
+            f.write("x")
+        c = self.make(speller=russian_speller())
+        self.assertIsNone(c.speller)
+        self.assertIn("spell_crash.flag", c.ui.hint.cget("text"))
+
+    def test_known_word_button_writes_the_file_and_the_word_stays_known(self):
+        c = self.make(speller=russian_speller())
+        c.ui.set_text("привет абвгд")
+        c.ui.tree.selection_set("0")
+        c.ui.mark_known()
+        path = config.rules_extra_path(self.dir.name)
+        with open(path, encoding="utf-8") as f:
+            self.assertTrue(f.read().rstrip().endswith("+ абвгд"))
+        self.assertIn("добавлено", c.ui.note_var.get())
+        self.assertEqual(c.ui.summary_var.get(), "Замечаний нет")
+        c.ui.set_text("привет абвгд")  # новый текст: слово уже в «своих словах»
+        self.assertEqual(c.ui.summary_var.get(), "Замечаний нет")
+
+    def test_known_words_from_file_are_read_at_start_and_on_change(self):
+        config.ensure_rules_extra(self.dir.name)
+        path = config.rules_extra_path(self.dir.name)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n+ абвгд\n")
+        c = self.make(speller=russian_speller())
+        c.ui.set_text("привет абвгд эюяфц")
+        self.assertEqual([c.ui.get_text()[i.start : i.end] for i in c.ui._shown], ["эюяфц"])
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("+ эюяфц\n")
+        os.utime(path, (os.path.getmtime(path) + 5, os.path.getmtime(path) + 5))
+        self.tick()
+        self.assertEqual(c.ui.summary_var.get(), "Замечаний нет")
+
+    def test_known_word_is_appended_on_a_new_line(self):
+        c = self.make(speller=russian_speller())
+        path = config.rules_extra_path(self.dir.name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("оч => очень")  # последняя строка без перевода строки
+        c.add_known_word("абвгд")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "оч => очень\n+ абвгд\n")
+
+    def test_unwritable_rules_file_is_reported_but_word_works_until_exit(self):
+        c = self.make(speller=russian_speller())
+        path = config.rules_extra_path(self.dir.name)
+        os.remove(path)
+        os.mkdir(path)  # вместо файла папка: открыть на запись нельзя
+        c.ui.set_text("привет абвгд")
+        c.ui.tree.selection_set("0")
+        c.ui.mark_known()
+        self.assertIn("не удалось записать", c.ui.note_var.get())
+        self.assertEqual(c.ui.summary_var.get(), "Замечаний нет")
+
+    def test_fix_and_copy_counts_spelling_among_what_is_left(self):
+        c = self.make(speller=russian_speller())
+        c.ui.set_text("Привет казел")
+        c.fix_and_copy()
+        self.assertEqual(self.win.text, "привет казел")
+        self.assertIn("Осталось на вашей проверке: 1", c.ui.note_var.get())
+
+    def test_selftest_gets_the_dictionary(self):
+        c = self.make(speller=russian_speller())
+        c.run_selftest()
+        self.root.update()
+        windows = [w for w in self.root.winfo_children() if w.winfo_class() == "Toplevel"]
+        report = [x for x in windows[0].winfo_children() if x.winfo_class() == "Text"][0].get("1.0", "end-1c")
+        self.assertIn("[ ОК ] Орфография", report)
+        self.assertIn("«казел» отклонён", report)
+
+
 class Quit(ControllerBase):
+    def test_x_button_quits_completely(self):
+        c = self.make()
+        self.root.tk.call(self.root.protocol("WM_DELETE_WINDOW"))  # так Windows сообщает окну о нажатии на крестик
+        self.assertTrue(c.closing)
+        self.assertTrue(self.win.thread.stopped)  # горячие клавиши освобождены
+        with self.assertRaises(tk.TclError):
+            self.root.winfo_exists()  # окно уничтожено, mainloop завершится, процесс выйдет
+
     def test_quit_cancels_polling(self):
         c = self.make()
         c.quit()

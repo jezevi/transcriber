@@ -34,6 +34,29 @@ class Config(unittest.TestCase):
         self.assertEqual(cfg["hotkey_fix"], "ctrl+alt+h")
         self.assertNotIn("старое_поле", cfg)
 
+    def test_spellcheck_option(self):
+        self.assertIs(config.DEFAULT_CONFIG["spellcheck"], True)
+        with open(self.path("config.json"), "w", encoding="utf-8") as f:
+            json.dump({"spellcheck": False}, f)
+        self.assertIs(config.load_config(self.dir.name)["spellcheck"], False)
+        with open(self.path("config.json"), "w", encoding="utf-8") as f:
+            json.dump({"spellcheck": "нет"}, f)
+        with self.assertRaises(TransCheckError) as cm:
+            config.load_config(self.dir.name)
+        self.assertIn("spellcheck", str(cm.exception))
+
+    def test_template_explains_own_words(self):
+        path = config.ensure_rules_extra(self.dir.name)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("+ ", text)
+        self.assertIn("слов", text)
+        from transcheck import rules_ru
+
+        rules, problems = rules_ru.parse_extra_rules(text)
+        self.assertEqual((rules, problems), ([], []))  # шаблон сам ничего не включает и не содержит ошибок
+        self.assertEqual(rules_ru.parse_known_words(text), set())
+
     def test_bad_values(self):
         for bad, text in (
             ({"topmost": "да"}, "topmost"),

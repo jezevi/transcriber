@@ -75,6 +75,30 @@ class FakeWin:
         self.queue.put(name)
 
 
+class FakeSpeller:
+    """Словарь из набора слов. Ведёт себя как проверка орфографии Windows: is_correct и suggest."""
+
+    def __init__(self, words=(), suggestions=None) -> None:
+        self.words = {w.lower() for w in words}
+        self.table = {k.lower(): list(v) for k, v in (suggestions or {}).items()}
+        self.checked = []
+
+    def is_correct(self, word: str) -> bool:
+        self.checked.append(word)
+        return word.lower() in self.words
+
+    def suggest(self, word: str, limit: int = 8):
+        return list(self.table.get(word.lower(), []))[:limit]
+
+
+def russian_speller() -> FakeSpeller:
+    """Словарь, которому можно доверять в самопроверке: знает контрольные верные слова (в том числе «козёл»), не знает контрольные ошибочные."""
+    return FakeSpeller(
+        ["привет", "мир", "сейчас", "козёл", "потому", "хотел", "вчера", "позвони", "узнать", "сроки", "не", "успел", "я", "пошел", "на", "бульвар", "вышел"],
+        {"казел": ["козёл", "казан", "Казел"], "хател": ["хотел", "хатал"]},
+    )
+
+
 def pump(root, ms: int = 400) -> None:
     """Даёт Tk обработать события и отложенные вызовы."""
     end = time.monotonic() + ms / 1000.0

@@ -8,7 +8,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
-from . import VERSION, config, rules_ru
+from . import VERSION, config, rules_ru, spell
 
 OK, FAIL, SKIP = "ok", "fail", "skip"
 
@@ -54,7 +54,9 @@ def _run(name: str, fn: Callable[[], Optional[Result]], results: List[Result]) -
         results.append(Result(name, FAIL, f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"))
 
 
-def run_all(directory: str, gui: bool = True, hotkeys_free: bool = True, winapi_mod: Any = None) -> List[Result]:
+def run_all(
+    directory: str, gui: bool = True, hotkeys_free: bool = True, winapi_mod: Any = None, speller: Any = None, spell_status: str = ""
+) -> List[Result]:
     results: List[Result] = []
 
     def system() -> Result:
@@ -129,6 +131,16 @@ def run_all(directory: str, gui: bool = True, hotkeys_free: bool = True, winapi_
         t.stop()
         return Result("Горячие клавиши", OK, "все три свободны и регистрируются")
 
+    def spelling() -> Result:
+        if speller is None:
+            return Result("Орфография", SKIP, "не проверяется: " + (spell_status or "словаря нет"))
+        problems = spell.probe(speller, spell.GOOD_WORDS, spell.BAD_WORDS)
+        service = spell.SpellService(speller)
+        detail = f"{spell_status}. «козел» принят, «казел» отклонён; варианты для «казел»: {', '.join(service.suggestions('казел')) or 'нет'}"
+        if problems:
+            return Result("Орфография", FAIL, spell_status + ":\n" + "\n".join(problems))
+        return Result("Орфография", OK, detail)
+
     def window() -> Result:
         if not gui:
             return Result("Окно", SKIP, "проверяется при запуске программы")
@@ -153,7 +165,7 @@ def run_all(directory: str, gui: bool = True, hotkeys_free: bool = True, winapi_
     t0 = time.perf_counter()
     for name, fn in (
         ("Система", system), ("Настройки и свои правила", settings), ("Правила на примерах из инструкции", examples),
-        ("Буфер обмена", clipboard), ("Горячие клавиши", hotkeys), ("Окно", window),
+        ("Буфер обмена", clipboard), ("Горячие клавиши", hotkeys), ("Орфография", spelling), ("Окно", window),
     ):
         _run(name, fn, results)
     results.append(Result("Время", OK, f"{time.perf_counter() - t0:.1f} с"))
@@ -186,7 +198,10 @@ def main(args: List[str]) -> int:
             winapi_mod = win_module
         except ImportError:
             winapi_mod = None
-    results = run_all(config.app_dir(), gui="--no-gui" not in args, hotkeys_free=True, winapi_mod=winapi_mod)
+    results = run_all(
+        config.app_dir(), gui="--no-gui" not in args, hotkeys_free=True, winapi_mod=winapi_mod,
+        speller=None, spell_status="проверяется кнопкой «Самопроверка» в окне работающей программы",
+    )
     report = format_report(results)
     if out:
         with open(out, "w", encoding="utf-8") as f:

@@ -5,9 +5,9 @@ import os
 import queue
 import sys
 import traceback
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
-from . import config, rules_ru
+from . import config, rules_ru, spell
 from .config import TransCheckError
 
 
@@ -25,6 +25,7 @@ class Controller:
         *,
         opener: Optional[Callable[[str], None]] = None,
         window_factory: Optional[Callable[..., Any]] = None,
+        speller_factory: Optional[Callable[[], Tuple[Any, str]]] = None,
     ) -> None:
         from . import ui
 
@@ -48,6 +49,10 @@ class Controller:
             f"{ui.pretty_hotkey(str(self.cfg[name]))} — {label}"
             for name, label in (("hotkey_check", "взять текст из буфера"), ("hotkey_fix", "исправить и скопировать"), ("hotkey_quit", "выход"))
         )
+        if not self.cfg["spellcheck"]:
+            self.speller, self.spell_status = None, "выключена в config.json (spellcheck)"
+        else:
+            self.speller, self.spell_status = spell.create_guarded(directory, speller_factory or spell.create_windows_speller)
         factory = window_factory or ui.MainWindow
         self.ui = factory(
             root,
@@ -62,6 +67,9 @@ class Controller:
             on_quit=self.quit,
             on_watch=self._watch_changed,
             on_topmost=self._topmost_changed,
+            on_known_word=self.add_known_word,
+            speller=self.speller,
+            spell_status=self.spell_status,
         )
         self.hotkey_thread = winapi_mod.start_hotkeys(combos, self.events)
         self._reload_rules()
@@ -160,8 +168,7 @@ class Controller:
         fixed = self.ui.fix_safe()
         if not self._write_clipboard(fixed):
             return
-        left = self.ui.analysis
-        rest = left.errors + left.warnings
+        rest = self.ui.remaining()
         changed = "Исправлено и скопировано." if fixed != before else "Автоматически исправлять было нечего, текст скопирован как есть."
         if rest:
             self.ui.note_set(f"{changed} Осталось на вашей проверке: {rest}. Посмотрите список, потом вставьте текст в поле: Ctrl+A, Ctrl+V.", "error")
@@ -195,14 +202,31 @@ class Controller:
             text = config.read_rules_extra(self.directory)
         except TransCheckError as e:
             self.ui.set_extra_rules(())
+            self.ui.set_known_words(set())
             self.ui.note_set(str(e), "error")
             return
         rules, problems = rules_ru.parse_extra_rules(text)
+        self.ui.set_known_words(rules_ru.parse_known_words(text))
         self.ui.set_extra_rules(rules)
         if problems:
             self.ui.note_set("Свои правила: " + "; ".join(problems[:3]), "error")
         elif not first:
             self.ui.note_set(f"Свои правила обновлены ({len(rules)}).", "ok")
+
+    def add_known_word(self, word: str) -> None:
+        """Кнопка «Слово верное»: дописывает строку «+ слово» в rules_extra.txt, дальше слово орфография не трогает."""
+        path = config.ensure_rules_extra(self.directory)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                existing = f.read()
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(("" if not existing or existing.endswith("\n") else "\n") + f"+ {word}\n")
+        except (OSError, UnicodeDecodeError) as e:
+            self.ui.note_set(f"Слово «{word}» не удалось записать в {path}: {e} Оно считается верным только до выхода из программы.", "error")
+            return
+        self._rules_mtime = None  # прочитать файл заново сразу, не дожидаясь очередного опроса
+        self._reload_rules()
+        self.ui.note_set(f"Слово «{word}» добавлено в свои слова (файл rules_extra.txt).", "ok")
 
     def open_rules(self) -> None:
         path = config.ensure_rules_extra(self.directory)
@@ -222,7 +246,9 @@ class Controller:
     def run_selftest(self) -> None:
         from . import selftest, ui
 
-        results = selftest.run_all(self.directory, gui=False, hotkeys_free=False, winapi_mod=self.win)
+        results = selftest.run_all(
+            self.directory, gui=False, hotkeys_free=False, winapi_mod=self.win, speller=self.speller, spell_status=self.spell_status
+        )
         ui.show_report(self.root, "TransCheck: самопроверка", selftest.format_report(results))
         # проверка записи в буфер могла изменить его: не принимаем это за копирование пользователя
         self._last_seq = self.win.clipboard_seq()

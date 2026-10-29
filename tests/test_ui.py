@@ -8,7 +8,7 @@ except ImportError:  # нет tkinter
     raise unittest.SkipTest("нет tkinter")
 from transcheck import rules_ru as R
 
-from .helpers import TkCase, pump
+from .helpers import TkCase, pump, russian_speller
 
 
 def _offset(widget, index):
@@ -284,7 +284,18 @@ class MainWindowTests(TkCase):
         w._topmost_changed()
         self.assertIn(("topmost", False), self.calls)
 
-    def test_x_minimizes_instead_of_closing(self):
+    def test_x_closes_the_program(self):
+        self.make()
+        self.root.tk.call(self.root.protocol("WM_DELETE_WINDOW"))  # так Windows сообщает окну о нажатии на крестик
+        self.assertEqual(self.calls[-1], "quit")  # то же действие, что у кнопки «Выход»
+
+    def test_x_closes_a_window_that_has_no_owner(self):
+        ui.MainWindow(self.root)
+        self.root.tk.call(self.root.protocol("WM_DELETE_WINDOW"))
+        with self.assertRaises(ui.tk.TclError):
+            self.root.winfo_exists()  # окно уничтожено, а не спрятано
+
+    def test_show_brings_window_back_without_stealing_focus(self):
         w = self.make()
         seen = []
         self.root.iconify = lambda: seen.append("iconify")  # на экране без оконного менеджера состояние окна не меняется
@@ -293,7 +304,6 @@ class MainWindowTests(TkCase):
         w.minimize()
         w.show()
         self.assertEqual(seen, ["iconify", "deiconify", "lift"])
-        self.assertIn("minimize", self.root.protocol("WM_DELETE_WINDOW"))  # крестик привязан к сворачиванию, а не к закрытию
 
     def clipped(self, w):
         """Элементы окна, которым дали меньше места, чем они просят. Список замечаний не считается: он может сжиматься."""
@@ -369,6 +379,116 @@ class MainWindowTests(TkCase):
         w.text.event_generate("<Control-KeyPress>", keycode=86)  # V
         pump(self.root, 100)
         self.assertEqual(w.get_text(), "вставка")
+
+
+class Spelling(TkCase):
+    """Орфография из словаря Windows: в тестах словарь заменён поддельным."""
+
+    make = MainWindowTests.make
+    mapped = MainWindowTests.mapped
+
+    def rows(self, w):
+        return [w.tree.item(i, "values") for i in w.tree.get_children()]
+
+    def test_misspelled_word_is_listed_as_check_not_as_all_clear(self):
+        w = self.make(speller=russian_speller(), spell_status="словарь теста")
+        w.set_text("привет казел")
+        self.assertEqual(w.summary_var.get(), "Замечаний: 1")  # раньше здесь было зелёное «Замечаний нет»
+        self.assertEqual(tag_text(w.text, "hl_warn"), ["казел"])
+        row = self.rows(w)[0]
+        self.assertEqual((row[0], row[1]), ("Проверить", "казел"))
+        self.assertIn("Орфография", row[2])
+        self.assertEqual([lbl.cget("text") for var, lbl in w._chips if lbl.winfo_manager()][-1], "Проверить: 1")
+
+    def test_correct_text_is_all_clear(self):
+        w = self.make(speller=russian_speller())
+        w.set_text("привет мир")
+        self.assertEqual(w.summary_var.get(), "Замечаний нет")
+        self.assertEqual(self.rows(w), [])
+
+    def test_suggestion_is_applied_by_button(self):
+        w = self.make(speller=russian_speller())
+        w.set_text("привет казел")
+        w.tree.selection_set("0")
+        w.apply_selected()
+        self.assertEqual(w.get_text(), "привет козел")
+        self.assertEqual(self.rows(w), [])  # «козел» словарь принимает (без «ё»)
+
+    def test_known_word_button_only_for_spelling(self):
+        w = self.make(speller=russian_speller())
+        w.set_text("привет казел ха ха")
+        self.assertFalse(self.mapped(w.btn_known))
+        w.tree.selection_set("0")
+        w._on_select()
+        self.assertTrue(self.mapped(w.btn_known))
+        w.tree.selection_set("1")  # «ха ха» не орфография
+        w._on_select()
+        self.assertFalse(self.mapped(w.btn_known))
+
+    def test_mark_known_hides_the_word_and_reports_it(self):
+        words = []
+        w = self.make(speller=russian_speller(), on_known_word=words.append)
+        w.set_text("привет казел и казел")
+        self.assertEqual(len(self.rows(w)), 2)
+        w.tree.selection_set("0")
+        w.mark_known()
+        self.assertEqual(words, ["казел"])
+        self.assertEqual(self.rows(w), [])  # оба места сразу: слово верное везде
+        self.assertEqual(w.summary_var.get(), "Замечаний нет")
+
+    def test_capital_letter_is_fixed_first_then_spelling_is_checked(self):
+        w = self.make(speller=russian_speller())
+        w.set_text("привет Казел")
+        self.assertEqual([r[2] for r in self.rows(w)], ["Регистр, знаки, «ё» (разд. 1)"])  # слово занято правилом про заглавные
+        w.fix_safe()
+        self.assertEqual([r[1] for r in self.rows(w)], ["казел"])  # после исправления орфография видит слово
+        w.set_known_words({"казел"})
+        self.assertEqual(self.rows(w), [])
+
+    def test_mark_known_needs_a_spelling_issue(self):
+        words = []
+        w = self.make(speller=russian_speller(), on_known_word=words.append)
+        w.set_text("привет ха ха")
+        w.tree.selection_set("0")
+        w.mark_known()
+        self.assertEqual(words, [])
+        self.assertIn("орфографии", w.note_var.get())
+
+    def test_set_known_words_refreshes_the_list(self):
+        w = self.make(speller=russian_speller())
+        w.set_text("привет абвгд")
+        self.assertEqual(len(self.rows(w)), 1)
+        w.set_known_words({"абвгд"})
+        self.assertEqual(self.rows(w), [])
+        w.set_known_words(set())
+        self.assertEqual(len(self.rows(w)), 1)
+
+    def test_other_rules_are_not_duplicated_by_spelling(self):
+        w = self.make(speller=russian_speller())
+        w.set_text("щас привет")  # «щас» уже правило «сейчас»: орфография молчит
+        self.assertEqual([r[2] for r in self.rows(w) if "Орфография" in r[2]], [])
+        self.assertEqual(w.fix_safe(), "сейчас привет")
+
+    def test_remaining_counts_what_the_button_will_not_fix(self):
+        w = self.make(speller=russian_speller())
+        self.assertEqual(w.remaining(), 0)
+        w.set_text("Привет казел 25")
+        self.assertEqual(w.remaining(), 2)  # «казел» и число; «Привет» исправится само
+        w.fix_safe()
+        self.assertEqual(w.remaining(), 2)
+
+    def test_hint_tells_whether_spelling_is_checked(self):
+        w = self.make(hotkeys_text="Ctrl+Alt+J", speller=russian_speller(), spell_status="словарь Windows ru-RU")
+        self.assertIn("Орфография: словарь Windows ru-RU", w.hint.cget("text"))
+        w2 = ui.MainWindow(self.root, spell_status="в Windows нет русского словаря")
+        self.assertIn("Орфографию программа не проверяет: в Windows нет русского словаря", w2.hint.cget("text"))
+        w2.set_text("казел")
+        self.assertEqual(w2.summary_var.get(), "Замечаний нет")  # честно: подсказка выше говорит, что орфография не проверяется
+
+    def test_many_misspellings_keep_the_window_usable(self):
+        w = self.make(speller=russian_speller())
+        w.set_text(" ".join(f"ббб{chr(1072 + i % 20)}{chr(1072 + i // 20)}" for i in range(100)))
+        self.assertLessEqual(len(self.rows(w)), 40)
 
 
 class ReportWindow(TkCase):

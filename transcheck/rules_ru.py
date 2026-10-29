@@ -194,6 +194,7 @@ CODE_TITLES = {
     "stutter": "Заикание",
     "check_word": "Проверьте слово",
     "other": "Другой алфавит",
+    "spell": "Орфография (слова нет в словаре)",
 }
 
 
@@ -390,7 +391,7 @@ def parse_extra_rules(text: str) -> Tuple[List[Rule], List[str]]:
     problems: List[str] = []
     for no, line in enumerate(text.replace("\r\n", "\n").split("\n"), start=1):
         s = line.strip()
-        if not s or s.startswith("#"):
+        if not s or s.startswith("#") or s.startswith("+"):  # «+ слово» — это «свои слова», их читает parse_known_words
             continue
         if "=>" not in s:
             problems.append(f"строка {no}: нет знака «=>» (нужно: как не надо => как надо)")
@@ -412,6 +413,18 @@ def parse_extra_rules(text: str) -> Tuple[List[Rule], List[str]]:
             continue
         rules.append(Rule(tuple(pattern), " ".join(replacement_words), "свои правила"))
     return rules, problems
+
+
+def parse_known_words(text: str) -> Set[str]:
+    """«Свои слова» из rules_extra.txt: строки «+ слово». Такие слова проверка орфографии не считает ошибками."""
+    words: Set[str] = set()
+    for line in text.replace("\r\n", "\n").split("\n"):
+        s = line.strip()
+        if s.startswith("+"):
+            for part in s[1:].split():
+                for w in _split_token(part)[0]:
+                    words.add(w.lower().replace("ё", "е"))
+    return words
 
 
 def _tokens(text: str) -> List[Tuple[int, int, str]]:

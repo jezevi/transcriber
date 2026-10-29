@@ -4,9 +4,9 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 from tkinter import ttk
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Set, Tuple
 
-from . import VERSION
+from . import VERSION, spell
 from . import rules_ru as R
 from .rules_ru import ERROR, INFO, WARN, Analysis, Issue, Rule
 
@@ -109,16 +109,24 @@ class MainWindow:
         on_copy: Callable[[], None] = lambda: None,
         on_rules: Callable[[], None] = lambda: None,
         on_selftest: Callable[[], None] = lambda: None,
-        on_quit: Callable[[], None] = lambda: None,
+        on_quit: Optional[Callable[[], None]] = None,
         on_watch: Callable[[bool], None] = lambda v: None,
         on_topmost: Callable[[bool], None] = lambda v: None,
+        on_known_word: Callable[[str], None] = lambda word: None,
         fix_hotkey: str = "",
+        speller: object = None,
+        spell_status: str = "",
     ) -> None:
         self.root = root
         self.on_fix_copy, self.on_copy, self.on_rules = on_fix_copy, on_copy, on_rules
-        self.on_selftest, self.on_quit = on_selftest, on_quit
-        self.on_watch, self.on_topmost = on_watch, on_topmost
+        self.on_selftest = on_selftest
+        self.on_quit: Callable[[], None] = on_quit or root.destroy  # без хозяина (отдельная проверка окна) крестик просто закрывает окно
+        self.on_watch, self.on_topmost, self.on_known_word = on_watch, on_topmost, on_known_word
         self.extra_rules: Sequence[Rule] = ()
+        self.known_words: Set[str] = set()  # слова из «своих слов»: орфография их не трогает
+        self.spell: Optional[spell.SpellService] = spell.SpellService(speller) if speller is not None else None
+        self.spell_status = spell_status
+        self._hotkeys_text = hotkeys_text
         self.analysis: Analysis = R.analyze("")
         self._shown: List[Issue] = []  # замечания в том порядке, как они показаны в списке
         self._last_text = ""
@@ -141,7 +149,7 @@ class MainWindow:
         y = max(0, min(int(30 * k), sh - height - 80))
         root.geometry(f"{width}x{height}+{x}+{y}")
         root.minsize(min_w, min_h)
-        root.protocol("WM_DELETE_WINDOW", self.minimize)
+        root.protocol("WM_DELETE_WINDOW", lambda: self.on_quit())  # крестик закрывает программу так же, как кнопка «Выход»
 
         pad = int(12 * k)
         self._pad = pad
@@ -159,8 +167,7 @@ class MainWindow:
         tk.Frame(head, bg=C["border"], height=1).pack(fill="x")
 
         self.hint = tk.Label(
-            root, justify="left", anchor="w", bg=C["bg"], fg=C["muted"], font=FONT_SMALL, wraplength=width - 2 * pad,
-            text=(f"Горячие клавиши: {hotkeys_text}" if hotkeys_text else ""),
+            root, justify="left", anchor="w", bg=C["bg"], fg=C["muted"], font=FONT_SMALL, wraplength=width - 2 * pad, text=self._hint_text(),
         )
         self._wrap_labels.append(self.hint)
 
@@ -243,6 +250,7 @@ class MainWindow:
         row2 = tk.Frame(root, bg=C["bg"])
         for text_, command in (("Копировать", lambda: self.on_copy()), ("Очистить", self.clear)):
             _button(row2, text_, command).pack(side="left", padx=(0, 6))
+        self.btn_known = _button(row2, "Слово верное", self.mark_known)  # появляется, когда выбрано замечание об орфографии
         for text_, command in (("Выход", lambda: self.on_quit()), ("Самопроверка", lambda: self.on_selftest()), ("Свои правила", lambda: self.on_rules())):
             _button(row2, text_, command, kind="ghost").pack(side="right", padx=(2, 0))
 
@@ -315,6 +323,34 @@ class MainWindow:
             root.geometry(f"{width}x{height}+{x}+{y}")
         root.bind("<Configure>", self._on_resize)
         self.refresh()
+
+    def _hint_text(self) -> str:
+        lines = []
+        if self._hotkeys_text:
+            lines.append(f"Горячие клавиши: {self._hotkeys_text}")
+        if self.spell is not None:
+            lines.append(f"Орфография: {self.spell_status or 'проверяется'}.")
+        else:
+            lines.append("Орфографию программа не проверяет" + (f": {self.spell_status}." if self.spell_status else "."))
+        return "\n".join(lines)
+
+    def set_known_words(self, words: Set[str]) -> None:
+        self.known_words = set(words)
+        self.refresh()
+
+    def remaining(self) -> int:
+        """Сколько замечаний осталось на проверке у человека (то, что кнопка «Исправить безопасное» сама не исправит)."""
+        return sum(1 for i in self._shown if not i.auto and i.level != INFO)
+
+    def mark_known(self) -> None:
+        issue = self.selected_issue()
+        if issue is None or issue.code != "spell":
+            self.note_set("Выберите замечание об орфографии.")
+            return
+        word = self.get_text()[issue.start : issue.end].lower()
+        self.known_words.add(word.replace("ё", "е"))
+        self.refresh()
+        self.on_known_word(word)
 
     def set_memo(self, show: bool) -> None:
         self.memo_open = bool(show)
@@ -434,7 +470,10 @@ class MainWindow:
         text = self.get_text()
         self._last_text = text
         self.analysis = R.analyze(text, self.extra_rules)
-        issues = self.analysis.issues
+        issues = list(self.analysis.issues)
+        if self.spell is not None:  # орфография: только слова, которых не коснулись другие правила
+            issues += spell.find_spelling_issues(text, self.spell, self.known_words, [(i.start, i.end) for i in issues])
+            issues.sort(key=lambda i: (i.start, i.end))
         self._shown = list(issues)
         for tag in ("hl_auto", "hl_warn", "hl_error", "hl_sel"):
             self.text.tag_remove(tag, "1.0", "end")
@@ -453,6 +492,7 @@ class MainWindow:
                 tags=("auto" if issue.auto else issue.level,),
             )
         self._set_detail(DETAIL_IDLE if issues else DETAIL_NONE, C["border"])
+        self.btn_known.pack_forget()
         if issues:
             self.tree_empty.place_forget()
         else:
@@ -499,8 +539,11 @@ class MainWindow:
     def _on_select(self, event: Optional[tk.Event] = None) -> None:
         self.text.tag_remove("hl_sel", "1.0", "end")
         issue = self.selected_issue()
+        self.btn_known.pack_forget()
         if issue is None:
             return
+        if issue.code == "spell":
+            self.btn_known.pack(side="left", padx=(0, 6))
         if not any(ord(c) > 0xFFFF for c in self.get_text()):
             self.text.tag_add("hl_sel", self._idx(issue.start), self._idx(issue.end))
             self.text.see(self._idx(issue.start))

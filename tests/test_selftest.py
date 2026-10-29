@@ -4,7 +4,7 @@ import unittest
 
 from transcheck import selftest
 
-from .helpers import FakeWin, TkCase
+from .helpers import FakeSpeller, FakeWin, TkCase, russian_speller
 
 
 class SelfTest(unittest.TestCase):
@@ -73,6 +73,37 @@ class SelfTest(unittest.TestCase):
         r = self.by_name(selftest.run_all(self.dir.name, gui=False, hotkeys_free=False))["Настройки и свои правила"]
         self.assertEqual(r.status, selftest.FAIL)
         self.assertIn("строка 1", r.detail)
+
+    def test_spelling_step_is_skipped_without_dictionary(self):
+        r = self.by_name(selftest.run_all(self.dir.name, gui=False, hotkeys_free=False, spell_status="в Windows нет словаря"))["Орфография"]
+        self.assertEqual(r.status, selftest.SKIP)
+        self.assertIn("в Windows нет словаря", r.detail)
+
+    def test_spelling_step_checks_good_and_bad_words(self):
+        r = self.by_name(selftest.run_all(self.dir.name, gui=False, hotkeys_free=False, speller=russian_speller(), spell_status="словарь теста"))["Орфография"]
+        self.assertEqual(r.status, selftest.OK, r.detail)
+        self.assertIn("«козел» принят", r.detail)
+        self.assertIn("«казел» отклонён", r.detail)
+        self.assertIn("козел", r.detail.split("варианты для «казел»:")[1])
+
+    def test_spelling_step_fails_when_dictionary_accepts_everything(self):
+        lenient = FakeSpeller(["козёл", "казел", "привет", "сейчас", "потому", "хотел", "вчера", "хател", "вчира", "патаму"])
+        r = self.by_name(selftest.run_all(self.dir.name, gui=False, hotkeys_free=False, speller=lenient, spell_status="словарь"))["Орфография"]
+        self.assertEqual(r.status, selftest.FAIL)
+        self.assertIn("словарь принял", r.detail)
+
+    def test_spelling_step_fails_when_dictionary_rejects_good_words(self):
+        r = self.by_name(selftest.run_all(self.dir.name, gui=False, hotkeys_free=False, speller=FakeSpeller([]), spell_status="словарь"))["Орфография"]
+        self.assertEqual(r.status, selftest.FAIL)
+        self.assertIn("не принял", r.detail)
+
+    def test_command_line_never_touches_the_dictionary(self):
+        out = os.path.join(self.dir.name, "report.txt")
+        selftest.main(["--selftest", "--quiet", "--no-gui", "--out", out])
+        with open(out, encoding="utf-8") as f:
+            report = f.read()
+        self.assertIn("[ -- ] Орфография", report)
+        self.assertIn("кнопкой «Самопроверка»", report)
 
     def test_report_text(self):
         text = selftest.format_report(selftest.run_all(self.dir.name, gui=False, hotkeys_free=False))
