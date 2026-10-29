@@ -3,6 +3,8 @@ import unittest
 from unittest import mock
 
 try:
+    import tkinter.font as tkfont
+
     from transcheck import ui
 except ImportError:  # нет tkinter
     raise unittest.SkipTest("нет tkinter")
@@ -49,6 +51,12 @@ class MainWindowTests(TkCase):
         kw.setdefault("on_quit", lambda: self.calls.append("quit"))
         kw.setdefault("on_watch", lambda v: self.calls.append(("watch", v)))
         kw.setdefault("on_topmost", lambda v: self.calls.append(("topmost", v)))
+        # Размер экрана задаём сами, иначе результат зависит от машины: у сборщика GitHub экран маленький, и памятка сворачивалась бы сама.
+        # А maxsize нужен, чтобы Windows не обрезала окно до настоящего (маленького) экрана.
+        if "winfo_screenheight" not in vars(self.root):
+            self.root.winfo_screenheight = lambda: 1080
+            self.root.winfo_screenwidth = lambda: 1920
+        self.root.maxsize(4000, 4000)
         self.win = ui.MainWindow(self.root, **kw)
         self.root.deiconify()
         self.root.update()
@@ -305,6 +313,19 @@ class MainWindowTests(TkCase):
         w.show()
         self.assertEqual(seen, ["iconify", "deiconify", "lift"])
 
+    def metrics(self, w):
+        """Строка для сообщения об ошибке: по ней видно, из-за чего на чужой машине не хватило места."""
+        self.root.update()
+        parts = [
+            f"экран {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()} (настоящий {self.root.tk.call('winfo', 'vrootheight', '.')})",
+            f"dpi {self.root.winfo_fpixels('1i'):.0f}", f"окно {self.root.geometry()}", f"просит {self.root.winfo_reqheight()}",
+            f"памятка {'открыта' if w.memo_open else 'свёрнута'}", f"список {w.tree.winfo_height()}",
+        ]
+        for name in ("FONT", "FONT_TEXT", "FONT_SMALL"):
+            parts.append(f"{name}={tkfont.Font(root=self.root, font=getattr(ui, name)).metrics('linespace')}")
+        parts += [f"{str(c).split('.')[-1]}:{c.winfo_height()}/{c.winfo_reqheight()}" for c in self.root.winfo_children() if c.winfo_ismapped()]
+        return "; ".join(parts)
+
     def clipped(self, w):
         """Элементы окна, которым дали меньше места, чем они просят. Список замечаний не считается: он может сжиматься."""
         self.root.update()
@@ -322,8 +343,8 @@ class MainWindowTests(TkCase):
         self.root.update()
         pump(self.root, 100)
         bottom = max(child.winfo_y() + child.winfo_height() for child in self.root.winfo_children())
-        self.assertLessEqual(bottom, self.root.winfo_height(), (bottom, self.root.winfo_height()))
-        self.assertEqual(self.clipped(w), [])  # окно может быть внутри экрана и всё равно обрезать подсказку, если ему дали мало места
+        self.assertLessEqual(bottom, self.root.winfo_height(), self.metrics(w))
+        self.assertEqual(self.clipped(w), [], self.metrics(w))  # окно может быть внутри экрана и всё равно обрезать подсказку, если ему дали мало места
         self.assertGreater(w.tree.winfo_height(), 60)  # список замечаний не сжат до нуля
 
     def test_small_window_squeezes_the_list_not_the_bottom(self):
@@ -340,9 +361,9 @@ class MainWindowTests(TkCase):
         self.root.winfo_screenwidth = lambda: 1920
         w = self.make(font_extra=2)
         w.set_text("Привет, Мир! щас 25")
-        self.assertEqual(self.clipped(w), [])  # с прежней раскладкой подсказка внизу оставалась высотой в одну строку
+        self.assertEqual(self.clipped(w), [], self.metrics(w))  # с прежней раскладкой подсказка внизу оставалась высотой в одну строку
         # окно растёт до того, что просит содержимое, но не выше экрана (там сжимается список замечаний)
-        self.assertGreaterEqual(self.root.winfo_height(), min(self.root.winfo_reqheight(), 1080 - 110) - 1)
+        self.assertGreaterEqual(self.root.winfo_height(), min(self.root.winfo_reqheight(), 1080 - 110) - 1, self.metrics(w))
 
     def test_window_fits_a_small_screen_at_large_scale(self):
         """Экран 1080 пикселей при масштабе 150 %: окно не должно быть выше экрана, и всё содержимое остаётся видно."""
@@ -357,10 +378,10 @@ class MainWindowTests(TkCase):
         height = int(geometry.split("x")[1].split("+")[0])
         self.assertLessEqual(height, 1080 - 100)
         bottom = max(child.winfo_y() + child.winfo_height() for child in self.root.winfo_children())
-        self.assertLessEqual(bottom, self.root.winfo_height())
-        self.assertEqual(self.clipped(w), [])
-        self.assertFalse(w.memo_open)  # места мало: памятка свёрнута, чтобы в списке осталось не меньше четырёх строк
-        self.assertGreaterEqual(w.tree.winfo_height(), 4 * int(27 * w.k))
+        self.assertLessEqual(bottom, self.root.winfo_height(), self.metrics(w))
+        self.assertEqual(self.clipped(w), [], self.metrics(w))
+        self.assertFalse(w.memo_open, self.metrics(w))  # места мало: памятка свёрнута, чтобы в списке осталось не меньше четырёх строк
+        self.assertGreaterEqual(w.tree.winfo_height(), 4 * int(27 * w.k), self.metrics(w))
 
     def test_labels_rewrap_when_window_is_resized(self):
         w = self.make()
