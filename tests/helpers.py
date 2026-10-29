@@ -92,6 +92,8 @@ class TkCase(unittest.TestCase):
     def setUp(self) -> None:
         self.root = tk.Tk()
         self.root.withdraw()
+        # масштаб экрана в Tk хранится на уровне дисплея и переживает окна: без этого один тест (150 %) меняет размеры в следующих
+        self.root.tk.call("tk", "scaling", 96 / 72)
 
     def tearDown(self) -> None:
         try:
